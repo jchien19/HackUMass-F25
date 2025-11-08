@@ -14,14 +14,13 @@ class EyeTracker:
         )
         self.mp_drawing = mp.solutions.drawing_utils
         
-        # Eye landmark indices for MediaPipe Face Mesh
+        # Eye landmark indices for MediaPipe Face Mesh, look for these online
         self.LEFT_EYE = [362, 385, 387, 263, 373, 380]
         self.RIGHT_EYE = [33, 160, 158, 133, 153, 144]
         self.LEFT_IRIS = [474, 475, 476, 477]
         self.RIGHT_IRIS = [469, 470, 471, 472]
         
         # Define screen attention zone (center box)
-        self.attention_zone = None
         self.looking_at_screen = False
         
     def get_eye_center(self, landmarks, eye_indices, img_w, img_h):
@@ -36,30 +35,35 @@ class EyeTracker:
         y_coords = [landmarks[idx].y * img_h for idx in iris_indices]
         return (int(np.mean(x_coords)), int(np.mean(y_coords)))
     
-    def is_looking_at_screen(self, left_iris, right_iris, frame_shape):
-        """Check if both irises are within the attention zone"""
-        h, w = frame_shape[:2]
+    def calculate_gaze_ratio(self, eye_center, iris_center):
+        """Calculate the ratio of iris offset from eye center"""
+        dx = iris_center[0] - eye_center[0]
+        dy = iris_center[1] - eye_center[1]
+        # distance = np.sqrt(dx**2 + dy**2)
+        return dx, dy #, distance
+    
+    def is_looking_at_screen(self, left_eye_center, right_eye_center, 
+                            left_iris, right_iris, frame_shape):
+        """Check if user is looking at screen based on iris-to-eye-center distance"""
+        # Calculate gaze ratios for both eyes
+        # left_dx, left_dy, left_dist = self.calculate_gaze_ratio(left_eye_center, left_iris)
+        # right_dx, right_dy, right_dist = self.calculate_gaze_ratio(right_eye_center, right_iris)
+        left_dx, left_dy = self.calculate_gaze_ratio(left_eye_center, left_iris)
+        right_dx, right_dy = self.calculate_gaze_ratio(right_eye_center, right_iris)
         
-        # Define attention zone (center 60% of screen)
-        if self.attention_zone is None:
-            margin_w = int(w * 0.3)
-            margin_h = int(h * 0.3)
-            self.attention_zone = {
-                'x1': margin_w,
-                'y1': margin_h,
-                'x2': w - margin_w,
-                'y2': h - margin_h
-            }
+        # Thresholds for "looking at screen" (adjust these based on testing)
+        # Lower values = more strict (must look more directly)
+        # Higher values = more lenient
+        horizontal_threshold = 4  # pixels
+        vertical_threshold = 3    # pixels
         
-        zone = self.attention_zone
+        # Check if iris is relatively centered in both eyes
+        left_centered = (abs(left_dx) < horizontal_threshold and 
+                        abs(left_dy) < vertical_threshold)
+        right_centered = (abs(right_dx) < horizontal_threshold and 
+                         abs(right_dy) < vertical_threshold)
         
-        # Check if both irises are in the zone
-        left_in = (zone['x1'] <= left_iris[0] <= zone['x2'] and 
-                   zone['y1'] <= left_iris[1] <= zone['y2'])
-        right_in = (zone['x1'] <= right_iris[0] <= zone['x2'] and 
-                    zone['y1'] <= right_iris[1] <= zone['y2'])
-        
-        return left_in and right_in
+        return left_centered and right_centered
     
     def process_frame(self, frame):
         """Process a single frame and detect eye position"""
@@ -79,26 +83,25 @@ class EyeTracker:
             left_iris = self.get_iris_position(landmarks, self.LEFT_IRIS, img_w, img_h)
             right_iris = self.get_iris_position(landmarks, self.RIGHT_IRIS, img_w, img_h)
             
-            # Draw eye regions
-            cv2.circle(frame, left_eye_center, 5, (0, 255, 0), -1)
-            cv2.circle(frame, right_eye_center, 5, (0, 255, 0), -1)
+            # Draw eye regions (larger circles for eye centers)
+            cv2.circle(frame, left_eye_center, 8, (0, 255, 255), 2)
+            cv2.circle(frame, right_eye_center, 8, (0, 255, 255), 2)
             
             # Draw iris positions
-            cv2.circle(frame, left_iris, 3, (255, 0, 0), -1)
-            cv2.circle(frame, right_iris, 3, (255, 0, 0), -1)
+            cv2.circle(frame, left_iris, 5, (255, 0, 0), -1)
+            cv2.circle(frame, right_iris, 5, (255, 0, 0), -1)
+            
+            # Draw lines from eye center to iris (showing offset)
+            cv2.line(frame, left_eye_center, left_iris, (0, 255, 0), 2)
+            cv2.line(frame, right_eye_center, right_iris, (0, 255, 0), 2)
             
             # Check if looking at screen
-            self.looking_at_screen = self.is_looking_at_screen(left_iris, right_iris, frame.shape)
-            
-            # Draw attention zone (bounding box)
-            if self.attention_zone:
-                zone = self.attention_zone
-                color = (0, 255, 0) if self.looking_at_screen else (0, 0, 255)
-                cv2.rectangle(frame, 
-                            (zone['x1'], zone['y1']), 
-                            (zone['x2'], zone['y2']), 
-                            color, 2)
-            
+            self.looking_at_screen = self.is_looking_at_screen(
+                left_eye_center, right_eye_center, 
+                left_iris, right_iris, 
+                frame.shape
+            )
+        
             # Display status
             status = "Looking at screen" if self.looking_at_screen else "Not looking at screen"
             color = (0, 255, 0) if self.looking_at_screen else (0, 0, 255)
@@ -108,10 +111,12 @@ class EyeTracker:
             return frame, self.looking_at_screen
         
         # No face detected
-        cv2.putText(frame, "NO FACE DETECTED", (10, 30), 
+        cv2.putText(frame, "No face detected", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         return frame, False
     
+    # For Jonathan use camera_index = 1
+    # For Owen use camera_index = 0
     def run(self, camera_index=1):
         """Main loop to run the eye tracker"""
         # Try to open camera with different backends
@@ -127,7 +132,7 @@ class EyeTracker:
             for i in range(5):
                 test_cap = cv2.VideoCapture(i)
                 if test_cap.isOpened():
-                    print(f"Found camera at index {i}")
+                    print(f"Found camera at index {i}, change the camera_index variable")
                     test_cap.release()
                 else:
                     break
@@ -166,8 +171,10 @@ class EyeTracker:
             # Here you can add your signal/callback when user looks away
             if not looking:
                 # Send signal or trigger action
-                pass  # Add your custom action here
-            
+                print("not looking")  # Add your custom action here
+            else:
+                print("looking")
+                
             # Display the frame
             cv2.imshow('Eye Tracker', processed_frame)
             
